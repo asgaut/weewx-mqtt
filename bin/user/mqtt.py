@@ -1,4 +1,4 @@
-# $Id: mqtt.py 1483 2016-04-25 06:53:19Z mwall $
+# $Id: mqtt.py 1701 2017-08-15 12:43:07Z mwall $
 # Copyright 2013 Matthew Wall
 """
 Upload data to MQTT server
@@ -28,6 +28,35 @@ Use of the inputs map to customer name, format, or units:
                 units = degree_F           # convert outTemp to F, others in C
             [[[[windSpeed]]]]
                 units = knot  # convert the wind speed to knots
+
+Use of TLS to encrypt connection to broker.  The TLS options will be passed to
+Paho client tls_set method.  Refer to Paho client documentation for details:
+
+  https://eclipse.org/paho/clients/python/docs/
+
+[StdRestful]
+    [[MQTT]]
+        ...
+        [[[tls]]]
+            # CA certificates file (mandatory)
+            ca_certs = /etc/ssl/certs/ca-certificates.crt
+            # PEM encoded client certificate file (optional)
+            certfile = /home/user/.ssh/id.crt
+            # private key file (optional)
+            keyfile = /home/user/.ssh/id.key
+            # Certificate requirements imposed on the broker (optional).
+            #   Options are 'none', 'optional' or 'required'.
+            #   Default is 'required'.
+            cert_reqs = required
+            # SSL/TLS protocol (optional).
+            #   Options include sslv1, sslv2, sslv23, tls, tlsv1.
+            #   Default is 'tlsv1'
+            #   Not all options are supported by all systems.
+            tls_version = tlsv1
+            # Allowable encryption ciphers (optional).
+            #   To specify multiple cyphers, delimit with commas and enclose
+            #   in quotes.
+            #ciphers =
 """
 
 import Queue
@@ -37,23 +66,22 @@ import syslog
 import time
 import urlparse
 
+try:
+    import cjson as json
+    setattr(json, 'dumps', json.encode)
+    setattr(json, 'loads', json.decode)
+except (ImportError, AttributeError):
+    try:
+        import simplejson as json
+    except ImportError:
+        import json
+
 import weewx
 import weewx.restx
 import weewx.units
 from weeutil.weeutil import to_bool, accumulateLeaves
 
-try:
-    import cjson as json
-    # XXX: maintain compatibility w/ json module
-    setattr(json, 'dumps', json.encode)
-    setattr(json, 'loads', json.decode)
-except Exception, e:
-    try:
-        import simplejson as json
-    except Exception, e:
-        import json
-
-VERSION = "0.15"
+VERSION = "0.17"
 
 if weewx.__version__ < "3":
     raise weewx.UnsupportedFeature("weewx 3 is required, found %s" %
@@ -72,9 +100,21 @@ def logerr(msg):
     logmsg(syslog.LOG_ERR, msg)
 
 def _compat(d, old_label, new_label):
-    if d.has_key(old_label) and not d.has_key(new_label):
+    if old_label in d and new_label not in d:
         d.setdefault(new_label, d[old_label])
         d.pop(old_label)
+
+def _obfuscate_password(url):
+    parts = urlparse.urlparse(url)
+    if parts.password is not None:
+        # split out the host portion manually. We could use
+        # parts.hostname and parts.port, but then you'd have to check
+        # if either part is None. The hostname would also be lowercased.
+        host_info = parts.netloc.rpartition('@')[-1]
+        parts = parts._replace(netloc='{}:xxx@{}'.format(
+            parts.username, host_info))
+        url = parts.geturl()
+    return url
 
 # some unit labels are rather lengthy.  this reduces them to something shorter.
 UNIT_REDUCTIONS = {
@@ -142,8 +182,12 @@ class MQTT(weewx.restx.StdRESTbase):
         inputs: dictionary of weewx observation names with optional upload
         name, format, and units
         Default is None
+
+        tls: dictionary of TLS parameters used by the Paho client to establish
+        a secure connection with the broker.
+        Default is None
         """
-        super(MQTT, self).__init__(engine, config_dict)        
+        super(MQTT, self).__init__(engine, config_dict)
         loginf("service version is %s" % VERSION)
         try:
             site_dict = config_dict['StdRESTful']['MQTT']
@@ -167,7 +211,10 @@ class MQTT(weewx.restx.StdRESTbase):
         if usn is not None:
             site_dict['unit_system'] = weewx.units.unit_constants[usn]
 
-        if config_dict['StdRESTful']['MQTT'].has_key('inputs'):
+        if 'tls' in config_dict['StdRESTful']['MQTT']:
+            site_dict['tls'] = dict(config_dict['StdRESTful']['MQTT']['tls'])
+
+        if 'inputs' in config_dict['StdRESTful']['MQTT']:
             site_dict['inputs'] = dict(config_dict['StdRESTful']['MQTT']['inputs'])
 
         site_dict['append_units_label'] = to_bool(site_dict.get('append_units_label'))
@@ -199,7 +246,10 @@ class MQTT(weewx.restx.StdRESTbase):
             loginf("topic is %s" % site_dict['topic'])
         if usn is not None:
             loginf("desired unit system is %s" % usn)
-        loginf("Data will be uploaded to %s" % site_dict['server_url'])
+        loginf("data will be uploaded to %s" %
+               _obfuscate_password(site_dict['server_url']))
+        if 'tls' in site_dict:
+            loginf("network encryption/authentication will be attempted")
 
     def new_archive_record(self, event):
         self.archive_queue.put(event.record)
@@ -207,12 +257,48 @@ class MQTT(weewx.restx.StdRESTbase):
     def new_loop_packet(self, event):
         self.archive_queue.put(event.packet)
 
+
+class TLSDefaults(object):
+    def __init__(self):
+        import ssl
+
+        # Paho acceptable TLS options
+        self.TLS_OPTIONS = [
+            'ca_certs', 'certfile', 'keyfile',
+            'cert_reqs', 'tls_version', 'ciphers'
+            ]
+        # map for Paho acceptable TLS cert request options
+        self.CERT_REQ_OPTIONS = {
+            'none': ssl.CERT_NONE,
+            'optional': ssl.CERT_OPTIONAL,
+            'required': ssl.CERT_REQUIRED
+            }
+        # Map for Paho acceptable TLS version options. Some options are
+        # dependent on the OpenSSL install so catch exceptions
+        self.TLS_VER_OPTIONS = dict()
+        try:
+            self.TLS_VER_OPTIONS['sslv2'] = ssl.PROTOCOL_SSLv2
+        except AttributeError:
+            pass
+        try:
+            self.TLS_VER_OPTIONS['sslv3'] = ssl.PROTOCOL_SSLv3
+        except AttributeError:
+            pass
+        self.TLS_VER_OPTIONS['sslv23'] = ssl.PROTOCOL_SSLv23
+        self.TLS_VER_OPTIONS['tlsv1'] = ssl.PROTOCOL_TLSv1
+        try:
+            self.TLS_VER_OPTIONS['tls'] = ssl.PROTOCOL_TLS
+        except AttributeError:
+            pass
+
+
 class MQTTThread(weewx.restx.RESTThread):
+
     def __init__(self, queue, server_url,
                  topic='', unit_system=None, skip_upload=False,
                  augment_record=True, retain=False, aggregation='individual',
                  inputs={}, obs_to_upload='all', append_units_label=True,
-                 manager_dict=None,
+                 manager_dict=None, tls=None,
                  post_interval=None, max_backlog=sys.maxint, stale=None,
                  log_success=True, log_failure=True,
                  timeout=60, max_tries=3, retry_wait=5):
@@ -231,6 +317,20 @@ class MQTTThread(weewx.restx.RESTThread):
         self.topic = topic
         self.upload_all = True if obs_to_upload.lower() == 'all' else False
         self.append_units_label = append_units_label
+        self.tls_dict = {}
+        if tls is not None:
+            # we have TLS options so construct a dict to configure Paho TLS
+            dflts = TLSDefaults()
+            for opt in tls:
+                if opt == 'cert_reqs':
+                    if tls[opt] in dflts.CERT_REQ_OPTIONS:
+                        self.tls_dict[opt] = dflts.CERT_REQ_OPTIONS.get(tls[opt])
+                elif opt == 'tls_version':
+                    if tls[opt] in dflts.TLS_VER_OPTIONS:
+                        self.tls_dict[opt] = dflts.TLS_VER_OPTIONS.get(tls[opt])
+                elif opt in dflts.TLS_OPTIONS:
+                    self.tls_dict[opt] = tls[opt]
+            logdbg("TLS parameters: %s" % self.tls_dict)
         self.inputs = inputs
         self.unit_system = unit_system
         self.augment_record = augment_record
@@ -304,6 +404,9 @@ class MQTTThread(weewx.restx.RESTThread):
                 mc = mqtt.Client()
                 if url.username is not None and url.password is not None:
                     mc.username_pw_set(url.username, url.password)
+                # if we have TLS opts configure TLS on our broker connection
+                if len(self.tls_dict) > 0:
+                    mc.tls_set(**self.tls_dict)
                 mc.connect(url.hostname, url.port)
                 mc.loop_start()
                 if self.aggregation.find('aggregate') >= 0:

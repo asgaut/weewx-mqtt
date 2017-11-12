@@ -1,4 +1,4 @@
-# $Id: install.py 1483 2016-04-25 06:53:19Z mwall $
+# $Id: install.py 1701 2017-08-15 12:43:07Z mwall $
 # installer for MQTT
 # Copyright 2014 Matthew Wall
 
@@ -10,7 +10,7 @@ def loader():
 class MQTTInstaller(ExtensionInstaller):
     def __init__(self):
         super(MQTTInstaller, self).__init__(
-            version="0.15",
+            version="0.17",
             name='mqtt',
             description='Upload weather data to MQTT server.',
             author="Matthew Wall",
