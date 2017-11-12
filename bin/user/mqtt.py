@@ -29,6 +29,8 @@ Use of the inputs map to customer name, format, or units:
             [[[[windSpeed]]]]
                 units = knot  # convert the wind speed to knots
 
+Note: JSON loop variables will be published as numbers (not strings) by default.
+
 Use of TLS to encrypt connection to broker.  The TLS options will be passed to
 Paho client tls_set method.  Refer to Paho client documentation for details:
 
@@ -81,7 +83,7 @@ import weewx.restx
 import weewx.units
 from weeutil.weeutil import to_bool, accumulateLeaves
 
-VERSION = "0.17"
+VERSION = "0.17-json-fix"
 
 if weewx.__version__ < "3":
     raise weewx.UnsupportedFeature("weewx 3 is required, found %s" %
@@ -365,14 +367,17 @@ class MQTTThread(weewx.restx.RESTThread):
             try:
                 v = float(record.get(k))
                 name = self.templates[k].get('name', k)
-                fmt = self.templates[k].get('format', '%s')
+                fmt = self.templates[k].get('format', 'float')
                 to_units = self.templates[k].get('units')
                 if to_units is not None:
                     (from_unit, from_group) = weewx.units.getStandardUnitType(
                         record['usUnits'], k)
                     from_t = (v, from_unit, from_group)
                     v = weewx.units.convert(from_t, to_units)[0]
-                s = fmt % v
+                if fmt == 'float':
+                    s = v
+                else:
+                    s = fmt % v
                 data[name] = s
             except (TypeError, ValueError):
                 pass
@@ -417,7 +422,7 @@ class MQTTThread(weewx.restx.RESTThread):
                         logerr("publish failed for %s: %s" % (tpc, res))
                 if self.aggregation.find('individual') >= 0:
                     for key in data:
-                        tpc = self.topic + '/' + key
+                        tpc = self.topic + '/meas/' + key
                         (res, mid) = mc.publish(tpc, data[key],
                                                 retain=self.retain)
                         if res != mqtt.MQTT_ERR_SUCCESS:

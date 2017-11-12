@@ -10,7 +10,7 @@ def loader():
 class MQTTInstaller(ExtensionInstaller):
     def __init__(self):
         super(MQTTInstaller, self).__init__(
-            version="0.17",
+            version="0.17-json-fix",
             name='mqtt',
             description='Upload weather data to MQTT server.',
             author="Matthew Wall",
