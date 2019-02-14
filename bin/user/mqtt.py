@@ -1,4 +1,4 @@
-# $Id: mqtt.py 1701 2017-08-15 12:43:07Z mwall $
+# $Id: mqtt.py 1784 2018-08-26 15:46:33Z mwall $
 # Copyright 2013 Matthew Wall
 """
 Upload data to MQTT server
@@ -81,7 +81,7 @@ import weewx.restx
 import weewx.units
 from weeutil.weeutil import to_bool, accumulateLeaves
 
-VERSION = "0.17"
+VERSION = "0.18"
 
 if weewx.__version__ < "3":
     raise weewx.UnsupportedFeature("weewx 3 is required, found %s" %
@@ -221,6 +221,7 @@ class MQTT(weewx.restx.StdRESTbase):
         site_dict['augment_record'] = to_bool(site_dict.get('augment_record'))
         site_dict['retain'] = to_bool(site_dict.get('retain'))
         binding = site_dict.pop('binding', 'archive')
+        loginf("binding to %s" % binding)
 
         # if we are supposed to augment the record with data from weather
         # tables, then get the manager dict to do it.  there may be no weather
@@ -237,9 +238,9 @@ class MQTT(weewx.restx.StdRESTbase):
         self.archive_thread = MQTTThread(self.archive_queue, **site_dict)
         self.archive_thread.start()
 
-        if binding == 'archive':
+        if 'archive' in binding:
             self.bind(weewx.NEW_ARCHIVE_RECORD, self.new_archive_record)
-        else:
+        if 'loop' in binding:
             self.bind(weewx.NEW_LOOP_PACKET, self.new_loop_packet)
 
         if 'topic' in site_dict:

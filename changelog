@@ -1,3 +1,7 @@
+0.18 26aug2018
+* added support for both archive and loop bindings
+
+
 0.17 15aug2017
 * added full TLS support (thanks to gary roderick)
 
